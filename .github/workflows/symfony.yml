@@ -1,0 +1,110 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: Symfony
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  symfony-tests:
+    runs-on: ubuntu-latest
+    steps:
+    #  To automatically get bug fixes and new Php versions for shivammathur/setup-php,
+    # change this to (see https://github.com/shivammathur/setup-php#bookmark-versioning):
+    # uses: shivammathur/setup-php@v2
+    - uses: shivammathur/setup-php@2cb9b829437ee246e9b3cac53555a39208ca6d28
+      with:
+        php-version: '8.0'
+    - uses: actions/checkout@v4
+    - name: Copy .env.test.local
+      run: php -r "file_exists('.env.test.local') || copy('.env.test', '.env.test.local');"
+    - name: Cache Composer packages
+      id: composer-cache
+      uses: actions/cache@v3
+      with:
+        path: vendor
+        key: ${{ runner.os }}-php-${{ hashFiles('**/composer.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-php-
+    - name: Install Dependencies
+      run: composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+    - name: Create Database
+      run: |
+        mkdir -p data
+        touch data/database.sqlite
+    - name: Execute tests (Unit and Feature tests) via PHPUnit
+      env:
+        DATABASE_URL: sqlite:///%kernel.project_dir%/data/database.sqlite
+      run: vendor/bin/phpunit
+
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    # Step 1: Checkout the code
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Step 2: Set Docker Image Tag (based on Git tag or commit SHA)
+    - name: Set Docker Image Tag
+      id: docker_tag
+      run: |
+        if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" == "tag" ]; then
+          TAG="${{ github.ref_name }}"
+          echo "DOCKER_TAG=$TAG" >> $GITHUB_ENV
+        else
+          exit 1
+        fi
+
+    - name: Create env
+      run: echo "${{ secrets.ENV }}" > .env
+
+    - name: Log in to Docker registry
+      uses: docker/login-action@v3.3.0
+      with:
+        registry: "${{ secrets.REGISTRY_URL }}"
+        username: "${{ secrets.DOCKER_USERNAME }}"
+        password: "${{ secrets.DOCKER_PASSWORD }}"
+
+    - name: Build Docker image
+      id: docker_build
+      uses: redhat-actions/buildah-build@v2
+      with:
+        image: ${{ secrets.IMAGE_NAME }}
+        tags: ${{ env.DOCKER_TAG }} latest
+        containerfiles: |
+          ./DockerfileProd
+          
+    - name: Push Docker image to registry
+      uses: redhat-actions/push-to-registry@v2
+      with:
+        image: ${{ secrets.IMAGE_NAME }}
+        tags: ${{ env.DOCKER_TAG }} latest
+        registry: ${{ secrets.REGISTRY_URL }}/${{ secrets.DOCKER_USERNAME }}
+  push:
+    runs-on: ubuntu-22.04
+    needs: build
+
+    steps:
+    # Step 1: Checkout the code
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: executing remote ssh commands using password
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        port: ${{ secrets.SSH_PORT }}
+        username: ${{ secrets.SSH_USER }}
+        password: ${{ secrets.SSH_PASS }}
+        script: |
+          docker login ${{ secrets.REGISTRY_URL }} -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+          docker pull ${{ secrets.REGISTRY_URL }}/${{ secrets.DOCKER_USERNAME }}/${{ secrets.IMAGE_NAME }}:latest &&
+          docker compose -f ${{ secrets.SSH_DOCKER_COMPOSE_REPO }} up -d
